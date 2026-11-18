@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  iOS 专用 Info.plist 片段。
+
+  Tauri CLI 在执行 `tauri ios build` / `tauri ios dev` 时会把本文件与
+  `gen/apple/<app>_iOS/Info.plist` 递归合并（见 tauri-cli 的 merge_plist），
+  所以这里只写「与模板不同」或「模板没有」的键，不要重复抄整份 plist。
+
+  注意：直接 `xcodebuild` 不会触发合并，必须走 `tauri ios build`
+  （scripts/build-ios-unsigned.sh 正是这么做的）。
+-->
+<plist version="1.0">
+<dict>
+  <!-- 竖屏刷剧 + 横屏全屏：横屏必须在这里放开，否则 set_orientation 的原生旋转请求会被系统拒绝 -->
+  <key>UISupportedInterfaceOrientations</key>
+  <array>
+    <string>UIInterfaceOrientationPortrait</string>
+    <string>UIInterfaceOrientationLandscapeLeft</string>
+    <string>UIInterfaceOrientationLandscapeRight</string>
+  </array>
+  <key>UISupportedInterfaceOrientations~ipad</key>
+  <array>
+    <string>UIInterfaceOrientationPortrait</string>
+    <string>UIInterfaceOrientationPortraitUpsideDown</string>
+    <string>UIInterfaceOrientationLandscapeLeft</string>
+    <string>UIInterfaceOrientationLandscapeRight</string>
+  </array>
+
+  <!-- 插件/接口经常是 http 明文或自定义端口，iOS 默认 ATS 会直接掐断 -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsArbitraryLoads</key>
+    <true/>
+    <key>NSAllowsArbitraryLoadsInWebContent</key>
+    <true/>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+  </dict>
+
+  <!-- 让用户能通过「文件」App 往 HGhub/Documents 里丢插件 js，再用插件中心导入 -->
+  <key>UIFileSharingEnabled</key>
+  <true/>
+  <key>LSSupportsOpeningDocumentsInPlace</key>
+  <true/>
+
+  <!-- 只用 HTTPS 传输，不走系统加密出口，App Store 复核时无需每次回答 -->
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <false/>
+</dict>
+</plist>

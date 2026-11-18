@@ -1,0 +1,148 @@
+name: Build iOS IPA
+
+# 一键产出 iPhone 可安装的 HGhub 安装包（未签名 .ipa）。
+# 说明与安装方法见 docs/iOS.md。
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（留空则取 src-tauri/tauri.conf.json 的 version）"
+        required: false
+        type: string
+  push:
+    tags: ["v*"]
+    branches: ["main"]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - ".github/ISSUE_TEMPLATE/**"
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios:
+    name: iOS Build (unsigned IPA)
+    # 固定 runner 版本：macos-latest 会随 Xcode 大版本漂移。
+    # 需要更新 Xcode 时改这里（macos-15 = Xcode 16.x）。
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      CI: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 对齐版本号
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            V="${{ inputs.version }}"
+          else
+            V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "本次打包版本：$V"
+          node -e '
+            const fs=require("fs");
+            const v=process.argv[1];
+            for (const p of ["src-tauri/tauri.conf.json","package.json"]) {
+              const j=JSON.parse(fs.readFileSync(p,"utf8"));
+              j.version=v;
+              fs.writeFileSync(p, JSON.stringify(j,null,2)+"\n");
+            }
+          ' "$V"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          # 与本地验证过的一致：pnpm 11 + pnpm-workspace.yaml 的 allowBuilds
+          # （esbuild 需要跑安装脚本，否则 vite build 没有二进制）
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ios
+
+      - name: 补齐 iOS 构建工具（xcodegen / cocoapods）
+        run: |
+          xcodebuild -version
+          command -v xcodegen >/dev/null || brew install xcodegen
+          command -v pod >/dev/null || brew install cocoapods
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 初始化 iOS Xcode 工程
+        # gen/apple 不入库，每次都要重新生成；init 会调用 xcodegen 生成 .xcodeproj。
+        run: pnpm tauri ios init --ci
+
+      - name: 打包免签名 ipa
+        run: node scripts/build-ios-unsigned.mjs "${{ steps.ver.outputs.version }}"
+
+      - name: 汇总产物
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lh artifacts/
+          for f in artifacts/*.ipa; do
+            [[ -f "$f" ]] || { echo "没有生成 ipa"; exit 1; }
+            echo "ipa=$f" >> "$GITHUB_OUTPUT"
+            echo "sha256=$(shasum -a 256 "$f" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+            echo "size=$(du -h "$f" | cut -f1)" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: 上传 ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: HGhub-iOS-${{ steps.ver.outputs.version }}
+          path: artifacts/*.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 发布到 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ steps.ver.outputs.version }}
+          SHA: ${{ steps.artifact.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          TAG="v${V}-ios"
+          NOTES="## HGhub iOS ${V}
+
+          - 未签名 ipa，需自签或 TrollStore 安装，详见 docs/iOS.md
+          - SHA256: \`${SHA}\`
+
+          ### 安装方式
+          1. **TrollStore（巨魔）**：直接导入 \`HGhub_${V}_ios.ipa\` 安装（仅支持 TrollStore 兼容系统）。
+          2. **AltStore / SideStore / Sideloadly**：用个人 Apple ID 自签安装，7 天需重签。
+          3. **ESign / 轻松签 / Feather 等**：导入自己的证书签名后安装。
+
+          > 自签安装后若提示「不受信任」，请在 设置 → 通用 → VPN与设备管理 中信任对应证书。"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/*.ipa --clobber
+            gh release edit "$TAG" --title "HGhub ${V} iOS" --notes "$NOTES"
+          else
+            gh release create "$TAG" artifacts/*.ipa --title "HGhub ${V} iOS" --notes "$NOTES"
+          fi
